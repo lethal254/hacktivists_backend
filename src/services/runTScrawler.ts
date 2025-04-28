@@ -307,6 +307,8 @@ export class WebCrawler {
       duration: 0,
       environment: process.env.NODE_ENV || 'development',
       logs: {
+        steps: [],
+        assertions: [],
         message: 'Test blocked due to failed dependencies'
       },
       createdAt: new Date().toISOString()
