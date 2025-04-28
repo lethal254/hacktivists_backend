@@ -47,6 +47,14 @@ export interface Step {
   expectedResult: string
   timeout?: number
   testCaseId: string
+  waitForNavigation?: boolean;
+  testData?: {
+    valid?: { [key: string]: string };
+    invalid?: { [key: string]: string };
+  };
+  useValidData?: boolean;
+
+
 }
  
 export interface Selector {

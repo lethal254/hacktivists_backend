@@ -198,55 +198,134 @@ export class WebCrawler {
   }
 
   private async executeStep(page: Page, step: Step): Promise<void> {
-    const selector = this.buildSelector(step.selector);
+    const selector = step.selector ? this.buildSelector(step.selector) : '';
+    
+    // Get test data value if it exists
+    const value = step.value || this.getValueFromTestData(step);
     
     switch (step.action) {
       case 'navigate':
-        await page.goto(step.value!);
+        const url = value || page.url();
+        await page.goto(url);
         break;
+
       case 'click':
         await page.click(selector);
         break;
+
       case 'type':
-        await page.fill(selector, step.value!);
+        if (!value) {
+          throw new Error(`No value provided for type action in step ${step.id}`);
+        }
+        await page.fill(selector, value);
         break;
+
+      case 'select':
+        if (!value) {
+          throw new Error(`No value provided for select action in step ${step.id}`);
+        }
+        await page.selectOption(selector, value);
+        break;
+
       case 'wait':
-        await page.waitForTimeout(step.timeout || 5000);
+        const timeout = step.timeout || 5000;
+        await page.waitForTimeout(timeout);
         break;
+
       default:
         throw new Error(`Unsupported action: ${step.action}`);
+    }
+
+    // Wait for navigation if specified
+    if (step.waitForNavigation) {
+      await page.waitForLoadState('networkidle');
     }
   }
 
   private async executeAssertion(page: Page, assertion: Assertion): Promise<void> {
-    if (assertion.selector) {
-      const selector = this.buildSelector(assertion.selector);
-      
-      switch (assertion.assertionType) {
-        case 'elementExists':
-          await page.waitForSelector(selector);
-          break;
-        case 'elementVisible':
-          await page.waitForSelector(selector, { state: 'visible' });
-          break;
-        case 'textEquals':
-          const content = await page.textContent(selector);
-          if (content !== assertion.expectedValue) {
-            throw new Error(`Text mismatch. Expected: ${assertion.expectedValue}, Found: ${content}`);
+    const selector = assertion.selector ? this.buildSelector(assertion.selector) : '';
+    
+    switch (assertion.assertionType) {
+      case 'elementExists':
+        await page.waitForSelector(selector, { state: 'attached' });
+        break;
+
+      case 'elementVisible':
+        await page.waitForSelector(selector, { state: 'visible' });
+        const element = await page.$(selector);
+        if (!element) {
+          throw new Error(`Element not found: ${selector}`);
+        }
+        
+        if (assertion.expectedValue) {
+          const text = await element.textContent();
+          if (text?.trim() !== assertion.expectedValue.trim()) {
+            throw new Error(
+              `Text mismatch. Expected: "${assertion.expectedValue}", Found: "${text}"`
+            );
           }
-          break;
-      }
+        }
+        break;
+
+      case 'urlEquals':
+        const currentUrl = page.url();
+        if (currentUrl !== assertion.expectedValue) {
+          throw new Error(
+            `URL mismatch. Expected: ${assertion.expectedValue}, Found: ${currentUrl}`
+          );
+        }
+        break;
+
+      case 'textContains':
+        if (!assertion.expectedValue) {
+          throw new Error('Expected value not provided for textContains assertion');
+        }
+        const content = await page.textContent(selector);
+        if (!content?.includes(assertion.expectedValue)) {
+          throw new Error(
+            `Text does not contain "${assertion.expectedValue}". Found: "${content}"`
+          );
+        }
+        break;
+
+      default:
+        throw new Error(`Unsupported assertion type: ${assertion.assertionType}`);
     }
   }
 
+  private getValueFromTestData(step: Step): string | null {
+    if (!step.testData) return null;
+
+    const testData = step.testData;
+    if (step.useValidData && testData.valid && testData.valid[step.value!]) {
+      return testData.valid[step.value!];
+    }
+    
+    if (!step.useValidData && testData.invalid && testData.invalid[step.value!]) {
+      return testData.invalid[step.value!];
+    }
+
+    return null;
+  }
+
   private buildSelector(selector: { type: SelectorType; value: string }): string {
+    if (!selector) return '';
+    
     switch (selector.type) {
       case 'id':
         return `#${selector.value}`;
+      case 'name':
+        return `[name="${selector.value}"]`;
       case 'css':
         return selector.value;
       case 'xpath':
         return `xpath=${selector.value}`;
+      case 'linkText':
+        return `text=${selector.value}`;
+      case 'className':
+        return `.${selector.value}`;
+      case 'tagName':
+        return selector.value;
       default:
         return selector.value;
     }
@@ -371,7 +450,7 @@ export class WebCrawler {
     }
   }
 
-  private getSuiteSummary(suiteRun: TestSuiteRun) {
+  public getSuiteSummary(suiteRun: TestSuiteRun) {
     return {
       suiteId: suiteRun.testSuiteId,
       status: suiteRun.status,
@@ -384,7 +463,7 @@ export class WebCrawler {
     };
   }
 
-  private getAllSuitesSummary(suiteRuns: TestSuiteRun[]) {
+  public getAllSuitesSummary(suiteRuns: TestSuiteRun[]) {
     return {
       totalSuites: suiteRuns.length,
       passedSuites: suiteRuns.filter(s => s.status === 'PASSED').length,

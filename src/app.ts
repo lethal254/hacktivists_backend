@@ -2,6 +2,7 @@ import express from 'express';
 import morgan from 'morgan';
 import helmet from 'helmet';
 import cors from 'cors';
+import testRunnerRoutes from './routes/runTsRoutes';
 
 import * as middlewares from './middlewares';
 import api from './api';
@@ -23,6 +24,8 @@ app.get<{}, MessageResponse>('/', (req, res) => {
 });
 
 app.use('/api/v1', api);
+app.use('/api/test-runner', testRunnerRoutes);
+
 
 app.use(middlewares.notFound);
 app.use(middlewares.errorHandler);
