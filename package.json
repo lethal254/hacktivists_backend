@@ -13,25 +13,24 @@
     "typecheck": "tsc --noEmit"
   },
   "keywords": [],
-  "author": "CJ R. <cj@null.computer> (https://w3cj.now.sh)",
+  "author": "Benard Ogutu",
   "repository": {
     "type": "git",
     "url": "https://github.com/lethal254/hacktivists_hackathon_backend.git"
   },
   "license": "MIT",
   "dependencies": {
-    "@types/selenium-webdriver": "^4.1.28",
-    "chromedriver": "^135.0.4",
     "@playwright/test": "^1.52.0",
     "@types/body-parser": "^1.19.5",
+    "@types/selenium-webdriver": "^4.1.28",
     "axios": "^1.9.0",
+    "chromedriver": "^135.0.4",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "dotenv": "^16.5.0",
     "express": "^4.21.2",
     "express-rate-limit": "^7.5.0",
     "helmet": "^8.0.0",
-    "selenium-webdriver": "^4.31.0",
     "hpp": "^0.2.3",
     "morgan": "^1.10.0",
     "playwright": "^1.52.0",
@@ -40,6 +39,7 @@
     "winston": "^3.17.0"
   },
   "devDependencies": {
+    "@types/cookie-parser": "^1.4.8",
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
     "@types/jest": "^29.5.13",
