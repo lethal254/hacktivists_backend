@@ -10,6 +10,7 @@ import swaggerJsDoc from "swagger-jsdoc"
 import { crawlerRouter } from "./routes/crawler"
 import { setupLogger } from "./utils/logger"
 import { Request, Response, NextFunction } from "express"
+import testRunnerRoutes from "./routes/runTsRoutes"
 
 dotenv.config()
 
@@ -186,6 +187,7 @@ app.use(
 )
 
 app.use("/api/crawler", crawlerRouter)
+app.use("/api/test-runner", testRunnerRoutes)
 
 app.get("/health", (req, res) => {
   res.status(200).json({
