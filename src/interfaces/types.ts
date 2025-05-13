@@ -179,6 +179,9 @@ export type AssertionType =
   | "urlEquals"
   | "urlContains"
   | "pageTitle"
+  | "loginSuccess"
+  | "loginFailure"
+  | "httpStatus" 
  
 export interface TestStats {
   total: number

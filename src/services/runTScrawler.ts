@@ -309,10 +309,10 @@ export class WebCrawler {
         break
 
       case "urlEquals":
-        const currentUrl = page.url()
-        if (currentUrl !== assertion.expectedValue) {
+        const pageUrl = page.url()
+        if (pageUrl !== assertion.expectedValue) {
           throw new Error(
-            `URL mismatch. Expected: ${assertion.expectedValue}, Found: ${currentUrl}`
+            `URL mismatch. Expected: ${assertion.expectedValue}, Found: ${pageUrl}`
           )
         }
         break
@@ -330,6 +330,42 @@ export class WebCrawler {
           )
         }
         break
+
+      case "loginSuccess":
+        await page.waitForNavigation({ waitUntil: 'networkidle' });
+        
+        const currentUrl = page.url();
+        if (!currentUrl.includes(assertion.expectedValue!)) {
+          throw new Error(`Login failed - Not redirected to ${assertion.expectedValue}`);
+        }
+
+        if (assertion.selector) {
+          await page.waitForSelector(selector, { state: 'visible' });
+        }
+        break;
+
+      case "loginFailure":
+        await page.waitForSelector(selector, { state: 'visible' });
+        const errorText = await page.textContent(selector);
+        
+        await this.captureScreenshot(page, `login-failure-${Date.now()}`);
+        
+        if (!errorText?.includes(assertion.expectedValue!)) {
+          throw new Error(
+            `Expected error "${assertion.expectedValue}" not found. Got: "${errorText}"`
+          );
+        }
+        break;
+
+      case "httpStatus":
+        const response = await page.waitForResponse(
+          response => response.status() === Number(assertion.expectedValue)
+        );
+        
+        if (!response.ok() && assertion.expectedValue === "200") {
+          throw new Error(`Expected HTTP 200 but got ${response.status()}`);
+        }
+        break;
 
       default:
         throw new Error(
