@@ -1,6 +1,8 @@
 import { Browser, chromium, Page } from "playwright"
 import winston from "winston"
 import path from "path"
+import fs from 'fs/promises';
+import { mkdir } from 'fs/promises';
 import {
   TestCase,
   TestSuite,
@@ -20,6 +22,8 @@ export class WebCrawler {
   private logger: winston.Logger
   private currentSuiteRun: TestSuiteRun | null = null
   private testRuns: Map<string, TestRun> = new Map()
+  private readonly screenshotDir: string = path.join(process.cwd(), 'testResults', 'screenshots');
+  private readonly logsDir: string = path.join(process.cwd(), 'testResults', 'logs');
 
   constructor() {
     this.logger = winston.createLogger({
@@ -34,6 +38,11 @@ export class WebCrawler {
         new winston.transports.Console(),
       ],
     })
+  }
+
+   private async ensureDirectoriesExist(): Promise<void> {
+    await mkdir(this.screenshotDir, { recursive: true });
+    await mkdir(this.logsDir, { recursive: true });
   }
 
   async initialize(): Promise<void> {
@@ -144,8 +153,8 @@ export class WebCrawler {
       createdAt: new Date().toISOString(),
     }
 
+    let page: Page = await this.browser!.newPage();
     try {
-      const page = await this.browser!.newPage()
 
       // Execute steps
       for (const step of testCase.steps) {
@@ -158,7 +167,7 @@ export class WebCrawler {
             timestamp: new Date().toISOString(),
           })
         } catch (error) {
-          testRun.screenshot = await this.captureScreenshot(page)
+          testRun.screenshot = await this.captureScreenshot(page, testCase.id)
           ;(testRun.logs?.steps as any[]).push({
             stepId: step.id,
             success: false,
@@ -195,17 +204,19 @@ export class WebCrawler {
       testRun.status = assertionsFailed ? "FAILED" : "PASSED"
       this.updateSuiteRunStats(testRun.status)
     } catch (error) {
-      testRun.status = "FAILED"
-      testRun.errorMessage =
-        error instanceof Error ? error.message : String(error)
-      testRun.stackTrace = error instanceof Error ? error.stack : undefined
-      this.updateSuiteRunStats("FAILED")
+      testRun.status = "FAILED";
+      testRun.errorMessage = error instanceof Error ? error.message : String(error);
+      testRun.stackTrace = error instanceof Error ? error.stack : undefined;
+      testRun.screenshot = await this.captureScreenshot(page, testCase.id);
+      await this.saveTestLogs(testRun);
+      this.updateSuiteRunStats("FAILED");
     } finally {
       testRun.completedAt = new Date().toISOString()
       testRun.duration = this.calculateDuration(
         testRun.startedAt,
         testRun.completedAt
       )
+      await this.saveTestLogs(testRun)
     }
 
     this.testRuns.set(testCase.id, testRun)
@@ -412,10 +423,55 @@ export class WebCrawler {
     }
   }
 
-  private async captureScreenshot(page: Page): Promise<string> {
-    const screenshotBuffer = await page.screenshot()
-    const screenshot = screenshotBuffer.toString("base64")
-    return `data:image/png;base64,${screenshot}`
+  private async captureScreenshot(page: Page, testCaseId: string): Promise<string> {
+    try {
+      await this.ensureDirectoriesExist();
+      
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const fileName = `${testCaseId}_${timestamp}.png`;
+      const filePath = path.join(this.screenshotDir, fileName);
+      
+      await page.screenshot({
+        path: filePath,
+        fullPage: true
+      });
+      
+      const screenshotBuffer = await fs.readFile(filePath);
+      const base64Screenshot = screenshotBuffer.toString('base64');
+      
+      this.logger.info(`Screenshot saved to ${filePath}`);
+      return `data:image/png;base64,${base64Screenshot}`;
+    } catch (error) {
+      this.logger.error('Failed to capture screenshot', { error });
+      throw error;
+    }
+  }
+
+  private async saveTestLogs(testRun: TestRun): Promise<void> {
+    try {
+      await this.ensureDirectoriesExist();
+      
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const fileName = `${testRun.testCaseId}_${timestamp}.json`;
+      const filePath = path.join(this.logsDir, fileName);
+      
+      const logData = {
+        testCaseId: testRun.testCaseId,
+        status: testRun.status,
+        startedAt: testRun.startedAt,
+        completedAt: testRun.completedAt,
+        duration: testRun.duration,
+        errorMessage: testRun.errorMessage,
+        stackTrace: testRun.stackTrace,
+        logs: testRun.logs
+      };
+      
+      await fs.writeFile(filePath, JSON.stringify(logData, null, 2));
+      this.logger.info(`Test logs saved to ${filePath}`);
+    } catch (error) {
+      this.logger.error('Failed to save test logs', { error });
+      throw error;
+    }
   }
 
   private recordBlockedTest(testCase: TestCase): void {
@@ -526,4 +582,6 @@ export class WebCrawler {
       ),
     }
   }
+
+ 
 }
