@@ -179,9 +179,28 @@ export type AssertionType =
   | "urlEquals"
   | "urlContains"
   | "pageTitle"
-  | "loginSuccess"
-  | "loginFailure"
+  |  "urlEquals"
+  | "textContains"
+  | "httpStatus"
+  | "formValidation"
+  | "apiResponse"
+  | "elementCount"
+  | "networkRequest"
+  | "performanceMetric"
+  | "accessibility"
   | "httpStatus" 
+
+
+export interface Assertion {
+  id: string
+  assertionType: AssertionType
+  selector?: Selector
+  expectedValue?: string
+  expectedStatuses?: number[]
+  apiEndpoint?: string
+  method?: string
+  captureScreenshot?: boolean
+}
  
 export interface TestStats {
   total: number

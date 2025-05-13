@@ -19,11 +19,13 @@ import {
 
 export class WebCrawler {
   private browser: Browser | null = null
-  private logger: winston.Logger
+   logger: winston.Logger
   private currentSuiteRun: TestSuiteRun | null = null
-  private testRuns: Map<string, TestRun> = new Map()
-  private readonly screenshotDir: string = path.join(process.cwd(), 'testResults', 'screenshots');
-  private readonly logsDir: string = path.join(process.cwd(), 'testResults', 'logs');
+  public testRuns: Map<string, TestRun> = new Map()
+   readonly screenshotDir: string = path.join(process.cwd(), 'testResults', 'screenshots');
+   readonly logsDir: string = path.join(process.cwd(), 'testResults', 'logs');
+   responseCache = new Map<string, any>();
+  public screenshotQueue: Array<{page: Page, testCaseId: string}> = [];
 
   constructor() {
     this.logger = winston.createLogger({
@@ -40,7 +42,7 @@ export class WebCrawler {
     })
   }
 
-   private async ensureDirectoriesExist(): Promise<void> {
+   public async ensureDirectoriesExist(): Promise<void> {
     await mkdir(this.screenshotDir, { recursive: true });
     await mkdir(this.logsDir, { recursive: true });
   }
@@ -230,7 +232,6 @@ export class WebCrawler {
   ): Promise<void> {
     const selector = step.selector ? this.buildSelector(step.selector) : ""
 
-    // Get test data value if it exists
     const value = step.value || this.getValueFromTestData(step)
 
     console.log(step, "********")
@@ -272,7 +273,6 @@ export class WebCrawler {
         throw new Error(`Unsupported action: ${step.action}`)
     }
 
-    // Wait for navigation if specified
     if (step.waitForNavigation) {
       await page.waitForLoadState("networkidle")
     }
@@ -286,91 +286,174 @@ export class WebCrawler {
       ? this.buildSelector(assertion.selector)
       : ""
 
-    switch (assertion.assertionType) {
-      case "elementExists":
-        await page.waitForSelector(selector, { state: "attached" })
-        break
+    try {
+      switch (assertion.assertionType) {
+        case "elementExists":
+          await page.waitForSelector(selector, { state: "attached" })
+          break
 
-      case "elementVisible":
-        await page.waitForSelector(selector, { state: "visible" })
-        const element = await page.$(selector)
-        if (!element) {
-          throw new Error(`Element not found: ${selector}`)
-        }
+        case "elementVisible":
+          await page.waitForSelector(selector, { state: "visible" })
+          const element = await page.$(selector)
+          if (!element) {
+            throw new Error(`Element not found: ${selector}`)
+          }
 
-        if (assertion.expectedValue) {
-          const text = await element.textContent()
-          if (text?.trim() !== assertion.expectedValue.trim()) {
+          if (assertion.expectedValue) {
+            const text = await element.textContent()
+            if (text?.trim() !== assertion.expectedValue.trim()) {
+              throw new Error(
+                `Text mismatch. Expected: "${assertion.expectedValue}", Found: "${text}"`
+              )
+            }
+          }
+          break
+
+        case "urlEquals":
+          const pageUrl = page.url()
+          if (pageUrl !== assertion.expectedValue) {
             throw new Error(
-              `Text mismatch. Expected: "${assertion.expectedValue}", Found: "${text}"`
+              `URL mismatch. Expected: ${assertion.expectedValue}, Found: ${pageUrl}`
             )
           }
-        }
-        break
+          break
 
-      case "urlEquals":
-        const pageUrl = page.url()
-        if (pageUrl !== assertion.expectedValue) {
-          throw new Error(
-            `URL mismatch. Expected: ${assertion.expectedValue}, Found: ${pageUrl}`
-          )
-        }
-        break
+        case "textContains":
+          if (!assertion.expectedValue) {
+            throw new Error(
+              "Expected value not provided for textContains assertion"
+            )
+          }
+          const content = await page.textContent(selector)
+          if (!content?.includes(assertion.expectedValue)) {
+            throw new Error(
+              `Text does not contain "${assertion.expectedValue}". Found: "${content}"`
+            )
+          }
+          break
 
-      case "textContains":
-        if (!assertion.expectedValue) {
-          throw new Error(
-            "Expected value not provided for textContains assertion"
-          )
-        }
-        const content = await page.textContent(selector)
-        if (!content?.includes(assertion.expectedValue)) {
-          throw new Error(
-            `Text does not contain "${assertion.expectedValue}". Found: "${content}"`
-          )
-        }
-        break
-
-      case "loginSuccess":
-        await page.waitForNavigation({ waitUntil: 'networkidle' });
-        
-        const currentUrl = page.url();
-        if (!currentUrl.includes(assertion.expectedValue!)) {
-          throw new Error(`Login failed - Not redirected to ${assertion.expectedValue}`);
-        }
-
-        if (assertion.selector) {
-          await page.waitForSelector(selector, { state: 'visible' });
-        }
-        break;
-
-      case "loginFailure":
-        await page.waitForSelector(selector, { state: 'visible' });
-        const errorText = await page.textContent(selector);
-        
-        await this.captureScreenshot(page, `login-failure-${Date.now()}`);
-        
-        if (!errorText?.includes(assertion.expectedValue!)) {
-          throw new Error(
-            `Expected error "${assertion.expectedValue}" not found. Got: "${errorText}"`
+        case "httpStatus":
+          const response = await page.waitForResponse(
+            response => response.url().includes(assertion.expectedValue!)
           );
-        }
-        break;
-
-      case "httpStatus":
-        const response = await page.waitForResponse(
-          response => response.status() === Number(assertion.expectedValue)
-        );
+          const status = response.status();
+          const statusText = response.statusText();
+          
+          this.logger.info('HTTP Response', {
+            status,
+            statusText,
+            url: response.url(),
+            headers: response.headers()
+          });
         
-        if (!response.ok() && assertion.expectedValue === "200") {
-          throw new Error(`Expected HTTP 200 but got ${response.status()}`);
-        }
-        break;
+          await this.captureScreenshot(page, `http-status-${status}`);
+          
+          const expectedStatuses = assertion.expectedStatuses || [200];
+          if (!expectedStatuses.includes(status)) {
+            const responseBody = await response.text();
+            throw new Error(
+              `Unexpected HTTP status: ${status} ${statusText}\n` +
+              `URL: ${response.url()}\n` +
+              `Response: ${responseBody.substring(0, 500)}...`
+            );
+          }
+          break;
 
-      default:
-        throw new Error(
-          `Unsupported assertion type: ${assertion.assertionType}`
-        )
+        case "formValidation":
+          await page.waitForSelector(selector, { state: 'visible' });
+          const errorMessages = await page.$$eval(
+            selector,
+            elements => elements.map(el => el.textContent)
+          );
+          
+          if (assertion.expectedValue) {
+            const hasExpectedError = errorMessages.some(
+              msg => msg?.includes(assertion.expectedValue!)
+            );
+            if (!hasExpectedError) {
+              await this.captureScreenshot(page, `form-validation-error`);
+              throw new Error(`Expected validation message not found: ${assertion.expectedValue}`);
+            }
+          }
+          break;
+
+        case "apiResponse":
+          const apiResponse = await page.waitForResponse(
+            response => response.url().includes(assertion.apiEndpoint!)
+          );
+          const responseData = await apiResponse.json();
+          
+          if (assertion.expectedValue && 
+              JSON.stringify(responseData) !== assertion.expectedValue) {
+            await this.captureScreenshot(page, `api-response-mismatch`);
+            throw new Error('API response does not match expected value');
+          }
+          break;
+
+        case "elementCount":
+          const elements = await page.$$(selector);
+          const count = elements.length;
+          
+          if (count !== Number(assertion.expectedValue)) {
+            await this.captureScreenshot(page, `element-count-mismatch`);
+            throw new Error(
+              `Expected ${assertion.expectedValue} elements, found ${count}`
+            );
+          }
+          break;
+
+        case "networkRequest":
+          const networkRequest = await page.waitForRequest(
+            request => request.url().includes(assertion.expectedValue!)
+          );
+          
+          if (assertion.method && networkRequest.method() !== assertion.method) {
+            await this.captureScreenshot(page, `network-request-method-mismatch`);
+            throw new Error(
+              `Expected ${assertion.method} request, got ${networkRequest.method()}`
+            );
+          }
+          break;
+
+        case "performanceMetric":
+          const metric = await page.evaluate(() => ({
+            loadTime: performance.timing.loadEventEnd - performance.timing.navigationStart,
+            domContentLoaded: performance.timing.domContentLoadedEventEnd - performance.timing.navigationStart
+          }));
+          
+          if (metric.loadTime > Number(assertion.expectedValue)) {
+            await this.captureScreenshot(page, `performance-metric-exceeded`);
+            throw new Error(`Page load time exceeded threshold: ${metric.loadTime}ms`);
+          }
+          break;
+
+        case "accessibility":
+          const accessibilityReport = await page.accessibility.snapshot();
+          if (!accessibilityReport) {
+            await this.captureScreenshot(page, `accessibility-violation`);
+            throw new Error('Accessibility check failed');
+          }
+          break;
+
+        default:
+          throw new Error(
+            `Unsupported assertion type: ${assertion.assertionType}`
+          );
+      }
+
+      if (assertion.captureScreenshot) {
+        await this.captureScreenshot(
+          page, 
+          `success-${assertion.assertionType}-${Date.now()}`
+        );
+      }
+
+    } catch (error) {
+      await this.captureScreenshot(
+        page,
+        `failed-${assertion.assertionType}-${Date.now()}`
+      );
+      throw error;
     }
   }
 
@@ -452,10 +535,22 @@ export class WebCrawler {
     return "FAILED"
   }
 
+  private clearCache(): void {
+    this.responseCache.clear();
+    this.testRuns.clear();
+    this.screenshotQueue = [];
+  }
+
   async cleanup(): Promise<void> {
-    if (this.browser) {
-      await this.browser.close()
-      this.browser = null
+    try {
+      await this.processScreenshotQueue();
+      this.clearCache();
+      if (this.browser) {
+        await this.browser.close();
+        this.browser = null;
+      }
+    } catch (error) {
+      this.logger.error("Error during cleanup", { error });
     }
   }
 
@@ -483,7 +578,7 @@ export class WebCrawler {
     }
   }
 
-  private async saveTestLogs(testRun: TestRun): Promise<void> {
+  public async saveTestLogs(testRun: TestRun): Promise<void> {
     try {
       await this.ensureDirectoriesExist();
       
@@ -533,29 +628,25 @@ export class WebCrawler {
   }
 
   async runAllTestSuites(testSuites: TestSuite[]): Promise<TestSuiteRun[]> {
-    const suiteRuns: TestSuiteRun[] = []
-
-    try {
-      if (!this.browser) {
-        await this.initialize()
-      }
-
-      for (const suite of testSuites) {
-        this.logger.info(`Starting test suite: ${suite.name}`)
-        const suiteRun = await this.runTestSuite(suite)
-        suiteRuns.push(suiteRun)
-      }
-
-      // Log summary
-      const summary = this.getAllSuitesSummary(suiteRuns)
-      this.logger.info("All test suites completed", { summary })
-
-      return suiteRuns
+      try {
+        if (!this.browser) {
+          await this.initialize();
+        }
+  
+        const concurrencyLimit = 4; 
+        const suiteRuns = await Promise.all(
+          testSuites.map(async (suite) => {
+            const context = await this.browser!.newContext();
+            const suiteRun = await this.runTestSuite(suite);
+            await context.close();
+            return suiteRun;
+          })
+        );
+  
+        return suiteRuns;
     } catch (error) {
-      this.logger.error("Error running all test suites", { error })
-      throw error
-    } finally {
-      await this.cleanup()
+      this.logger.error("Error running test suites", { error });
+      throw error;
     }
   }
 
@@ -619,5 +710,58 @@ export class WebCrawler {
     }
   }
 
- 
+  public async getResponseDetails(response: any) {
+    const url = response.url();
+    if (this.responseCache.has(url)) {
+      return this.responseCache.get(url);
+    }
+
+    const details = {
+      status: response.status(),
+      statusText: response.statusText(),
+      url,
+      headers: response.headers(),
+      body: await response.text().catch(() => 'Unable to get response body'),
+      timing: response.timing()
+    };
+
+    this.responseCache.set(url, details);
+    return details;
+  }
+
+  private async cleanupTestRun(page: Page): Promise<void> {
+    try {
+      await page.close();
+    } catch (error) {
+      this.logger.error("Error closing page", { error });
+    }
+  }
+
+  public async processScreenshotQueue(): Promise<void> {
+    while (this.screenshotQueue.length > 0) {
+      const batch = this.screenshotQueue.splice(0, 5);
+      await Promise.all(
+        batch.map(({page, testCaseId}) => 
+          this.captureScreenshot(page, testCaseId)
+        )
+      );
+    }
+  }
+
+  public async measurePerformance<T>(
+    operation: () => Promise<T>,
+    operationName: string
+  ): Promise<T> {
+    const startTime = Date.now();
+    try {
+      const result = await operation();
+      const duration = Date.now() - startTime;
+      this.logger.info(`Operation ${operationName} completed`, { duration });
+      return result;
+    } catch (error) {
+      const duration = Date.now() - startTime;
+      this.logger.error(`Operation ${operationName} failed`, { duration, error });
+      throw error;
+    }
+  }
 }
