@@ -27,10 +27,33 @@ interface CrawlResult {
   timestamp: number;
 }
 
+interface MemoryUsage {
+  heapUsed: number;
+  heapTotal: number;
+  external: number;
+  arrayBuffers: number;
+}
+
+interface CrawlerStats {
+  memoryUsage: MemoryUsage;
+  crawlDuration: number;
+  elementsFound: number;
+  errorCount: number;
+}
+
+const MEMORY_THRESHOLD = 1024 * 1024 * 1024; // 1GB
+const MAX_RETRY_ATTEMPTS = 3;
+const RECOVERY_DELAY = 1000; // 1 second
+
 export class WebCrawler {
   private logger: Logger;
-
   private browser: Browser | null = null;
+  private stats: CrawlerStats = {
+    memoryUsage: process.memoryUsage(),
+    crawlDuration: 0,
+    elementsFound: 0,
+    errorCount: 0
+  };
 
   constructor() {
     this.logger = getLogger('WebCrawler');
@@ -56,34 +79,72 @@ export class WebCrawler {
     }
   }
 
-  async crawlPage(url: string): Promise<CrawlResult> {
-    if (!this.browser) {
-      await this.initialize();
+  private validateUrl(url: string): boolean {
+    try {
+      new URL(url);
+      return true;
+    } catch (error) {
+      this.logger.error(`Invalid URL: ${url}`);
+      return false;
     }
+  }
 
-    this.logger.info(`Crawling URL: ${url}`);
-    const context = await this.browser!.newContext({
-      viewport: { width: 1280, height: 800 },
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-    });
+  private validateBrowserState(): void {
+    if (!this.browser) {
+      throw new Error('Browser not initialized. Call initialize() first.');
+    }
+  }
 
-    const page = await context.newPage();
-    await page.goto(url, { waitUntil: 'networkidle' });
+  async crawlPage(url: string): Promise<CrawlResult> {
+    const startTime = Date.now();
+    
+    try {
+      if (!url || !this.validateUrl(url)) {
+        throw new Error('Invalid URL provided');
+      }
 
-    const title = await page.title();
-    const screenshot = await page.screenshot({ type: 'jpeg', quality: 80 });
-    const base64Screenshot = screenshot.toString('base64');
+      this.validateBrowserState();
+      await this.monitorMemoryUsage();
 
-    const elements = await this.findTestableElements(page);
+      return await this.retryOperation(async () => {
+        const context = await this.browser!.newContext({
+          viewport: { width: 1280, height: 800 },
+          userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        });
 
-    await context.close();
+        const page = await context.newPage();
+        
+        try {
+          await page.goto(url, { 
+            waitUntil: 'networkidle',
+            timeout: 30000 
+          });
 
-    return {
-      url,
-      title,
-      elements,
-      timestamp: Date.now(),
-    };
+          const title = await page.title();
+          const elements = await this.findTestableElements(page);
+          
+          this.stats.elementsFound = elements.length;
+          this.stats.crawlDuration = Date.now() - startTime;
+
+          return {
+            url,
+            title,
+            elements,
+            timestamp: Date.now(),
+          };
+        } finally {
+          await context.close();
+          await this.monitorMemoryUsage();
+        }
+      });
+    } catch (error) {
+      this.logger.error('Crawl failed', {
+        url,
+        error,
+        stats: this.stats
+      });
+      throw error;
+    }
   }
 
   private async findTestableElements(page: Page): Promise<TestableElement[]> {
@@ -143,17 +204,19 @@ export class WebCrawler {
     const buttons = await page.$$('button, input[type="button"], input[type="submit"], a.btn, .button, [role="button"]');
     
     for (const button of buttons) {
-      const boundingBox = await button.boundingBox();
-      const innerText = await button.innerText();
-      
-      if (boundingBox) {
-        buttonElements.push({
-          type: 'button',
-          identifier: await this.generateElementIdentifier(button),
-          attributes: await this.extractAttributes(button),
-          innerText,
-          location: boundingBox,
-        });
+      if (await this.validateElement(button)) {
+        const boundingBox = await button.boundingBox();
+        const innerText = await button.innerText();
+        
+        if (boundingBox) {
+          buttonElements.push({
+            type: 'button',
+            identifier: await this.generateElementIdentifier(button),
+            attributes: await this.extractAttributes(button),
+            innerText,
+            location: boundingBox,
+          });
+        }
       }
     }
     
@@ -210,14 +273,25 @@ export class WebCrawler {
     return inputElements;
   }
 
+  private async validateAttributes(attributes: Record<string, string>): Promise<Record<string, string>> {
+    const validAttributes: Record<string, string> = {};
+    for (const [key, value] of Object.entries(attributes)) {
+      if (typeof value === 'string' && value.length < 1000) { // Prevent extremely long values
+        validAttributes[key] = value;
+      }
+    }
+    return validAttributes;
+  }
+
   private async extractAttributes(element: ElementHandle): Promise<Record<string, string>> {
-    return element.evaluate((el: Element) => {
+    const attributes = await element.evaluate((el: Element) => {
       const attributes: Record<string, string> = {};
       for (const attr of el.attributes) {
         attributes[attr.name] = attr.value;
       }
       return attributes;
     });
+    return this.validateAttributes(attributes);
   }
 
   private async generateUniqueSelector(element: ElementHandle): Promise<string> {
@@ -287,5 +361,68 @@ export class WebCrawler {
         value: ''
       };
     });
+  }
+
+  private async validateElement(element: ElementHandle): Promise<boolean> {
+    try {
+      const isVisible = await element.isVisible();
+      const boundingBox = await element.boundingBox();
+      return isVisible && boundingBox !== null;
+    } catch (error) {
+      this.logger.warn('Element validation failed', error);
+      return false;
+    }
+  }
+
+  private async monitorMemoryUsage(): Promise<void> {
+    const memoryUsage = process.memoryUsage();
+    this.stats.memoryUsage = memoryUsage;
+
+    if (memoryUsage.heapUsed > MEMORY_THRESHOLD) {
+      this.logger.warn('Memory usage exceeded threshold, initiating garbage collection');
+      if (global.gc) {
+        global.gc();
+      }
+      await this.recoveryAction();
+    }
+  }
+
+  private async recoveryAction(): Promise<void> {
+    try {
+      await this.close();
+      await new Promise(resolve => setTimeout(resolve, RECOVERY_DELAY));
+      await this.initialize();
+    } catch (error) {
+      this.logger.error('Recovery action failed', error);
+      throw error;
+    }
+  }
+
+  private async retryOperation<T>(
+    operation: () => Promise<T>,
+    retryCount = 0
+  ): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      this.stats.errorCount++;
+      
+      if (retryCount >= MAX_RETRY_ATTEMPTS) {
+        this.logger.error(`Operation failed after ${MAX_RETRY_ATTEMPTS} attempts`, error);
+        throw error;
+      }
+
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.warn(`Retry attempt ${retryCount + 1} after error: ${errorMessage}`);
+      await new Promise(resolve => setTimeout(resolve, RECOVERY_DELAY * (retryCount + 1)));
+      return this.retryOperation(operation, retryCount + 1);
+    }
+  }
+
+  public getStats(): CrawlerStats {
+    return {
+      ...this.stats,
+      memoryUsage: process.memoryUsage()
+    };
   }
 }

@@ -2,6 +2,26 @@ import { Router, Request, Response } from 'express';
 import { WebCrawler } from '../services/crawler';
 import { getLogger } from '../utils/logger';
 
+interface CrawlerStats {
+  memoryUsage?: number;
+  crawlDuration?: number;
+  elementsFound?: number;
+  errorCount?: number;
+}
+
+interface CrawlerStatus {
+  status: string;
+  initialized: boolean;
+  timestamp: string;
+  stats?: CrawlerStats;
+}
+
+interface CrawlError {
+  error: string;
+  message?: string;
+  details?: any;
+}
+
 const router = Router();
 const logger = getLogger('CrawlerRoutes');
 const crawler = new WebCrawler();
@@ -46,19 +66,34 @@ router.post('/scan', async (req: Request, res: Response) => {
     const { url } = req.body;
     
     if (!url) {
-      return res.status(400).json({ error: 'URL is required' });
+      return res.status(400).json({ 
+        error: 'URL is required',
+        details: 'Please provide a valid URL in the request body' 
+      });
     }
     
     logger.info(`Received crawl request for URL: ${url}`);
-    const result = await crawler.crawlPage(url);
     
-    return res.status(200).json(result);
+    const result = await crawler.crawlPage(url);
+    const stats = crawler.getStats();
+    
+    return res.status(200).json({
+      ...result,
+      performance: {
+        duration: stats.crawlDuration,
+        elementsFound: stats.elementsFound,
+        errorCount: stats.errorCount
+      }
+    });
+    
   } catch (error) {
     logger.error('Error during crawl operation', error);
-    return res.status(500).json({ 
+    const errorResponse: CrawlError = {
       error: 'Failed to crawl the page',
       message: error instanceof Error ? error.message : 'Unknown error',
-    });
+      details: error instanceof Error ? error.stack : undefined
+    };
+    return res.status(500).json(errorResponse);
   }
 });
 
@@ -135,19 +170,58 @@ router.post('/element', async (req: Request, res: Response) => {
  */
 router.get('/status', async (_req: Request, res: Response) => {
   try {
-    return res.status(200).json({
+    const stats = crawler.getStats();
+    const status: CrawlerStatus = {
       status: 'operational',
       initialized: true,
       timestamp: new Date().toISOString(),
-    });
+      stats: {
+        memoryUsage: stats.memoryUsage?.heapUsed,
+        crawlDuration: stats.crawlDuration,
+        elementsFound: stats.elementsFound,
+        errorCount: stats.errorCount
+      }
+    };
+    
+    return res.status(200).json(status);
   } catch (error) {
     logger.error('Error getting crawler status', error);
-    return res.status(500).json({ error: 'Failed to get crawler status' });
+    return res.status(500).json({ 
+      error: 'Failed to get crawler status',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/crawler/stats:
+ *   get:
+ *     summary: Get crawler statistics
+ *     description: Returns detailed statistics about crawler operations
+ *     tags: [Crawler]
+ *     responses:
+ *       200:
+ *         description: Statistics retrieved successfully
+ *       500:
+ *         description: Server error while retrieving statistics
+ */
+router.get('/stats', async (_req: Request, res: Response) => {
+  try {
+    const stats = crawler.getStats();
+    return res.status(200).json(stats);
+  } catch (error) {
+    logger.error('Error getting crawler stats', error);
+    return res.status(500).json({ 
+      error: 'Failed to get crawler statistics',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
   }
 });
 
 process.on('SIGINT', async () => {
-  logger.info('Process terminating, closing crawler');
+  const stats = crawler.getStats();
+  logger.info('Process terminating, closing crawler', { finalStats: stats });
   await crawler.close();
   process.exit(0);
 });
